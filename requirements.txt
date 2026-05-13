@@ -1,0 +1,10 @@
+# data handling
+numpy
+pandas
+
+# data visualization
+matplotlib
+seaborn
+
+# for advanced RN
+pytorch
