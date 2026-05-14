@@ -1,0 +1,4 @@
+- Revisar funciones redundantes (doble fit)
+- Revisar formateo de funciones y docstrings
+- Revisar la implementacion de grid search
+- Cambiar uso de procesadores de numpy

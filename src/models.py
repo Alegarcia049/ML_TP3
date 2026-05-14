@@ -10,7 +10,15 @@ class MLPClassifier:
     descent optimization.
     """
     ### MO
-    def __init__(self, layer_sizes, learning_rate):
+    def __init__(
+        self,
+        layer_sizes,
+        learning_rate=0.01,
+        seed=42,
+        use_batch_norm=False,
+        bn_momentum=0.9,
+        bn_epsilon=1e-5
+        ):
         """
         Initialize the MLP model.
 
@@ -19,16 +27,37 @@ class MLPClassifier:
         layer_sizes : list[int]
             Network architecture. Example: [784, 128, 64, 47].
         learning_rate : float
-            Gradient descent learning rate.
+            Default gradient descent learning rate.
+        seed : int
+            Random seed for reproducibility.
+        use_batch_norm : bool
+            Whether to apply batch normalization to hidden layers.
+        bn_momentum : float
+            Momentum used for running mean and variance.
+        bn_epsilon : float
+            Numerical stability constant for batch normalization.
         """
         self.layer_sizes = layer_sizes
         self.learning_rate = learning_rate
+        self.rng = np.random.default_rng(seed)
+
+        self.use_batch_norm = use_batch_norm
+        self.bn_momentum = bn_momentum
+        self.bn_epsilon = bn_epsilon
 
         self.weights = []
         self.biases = []
         self.cache = {}
 
+        self.bn_gamma = []
+        self.bn_beta = []
+        self.bn_running_mean = []
+        self.bn_running_var = []
+
         self._initialize_parameters()
+
+        if self.use_batch_norm:
+            self._initialize_batch_norm_parameters()
 
     def _initialize_parameters(self):
         """
@@ -50,6 +79,22 @@ class MLPClassifier:
             self.weights.append(W)
             self.biases.append(b)
 
+    def _initialize_batch_norm_parameters(self):
+        """
+        Initialize batch normalization parameters for hidden layers only.
+        """
+        for hidden_size in self.layer_sizes[1:-1]:
+            gamma = np.ones((1, hidden_size))
+            beta = np.zeros((1, hidden_size))
+
+            running_mean = np.zeros((1, hidden_size))
+            running_var = np.ones((1, hidden_size))
+
+            self.bn_gamma.append(gamma)
+            self.bn_beta.append(beta)
+            self.bn_running_mean.append(running_mean)
+            self.bn_running_var.append(running_var)
+
     def _relu(self, Z):
         """
         Apply ReLU activation.
@@ -70,7 +115,7 @@ class MLPClassifier:
         exp_scores = np.exp(Z_shifted)
         return exp_scores / np.sum(exp_scores, axis=1, keepdims=True)
     
-    def forward(self, X):
+    def forward(self, X, training=True):
         """
         Run the forward pass.
 
@@ -78,11 +123,13 @@ class MLPClassifier:
         ----------
         X : np.ndarray
             Input matrix with shape (n_samples, n_features).
+        training : bool
+            Whether the model is in training mode.
 
         Returns
         -------
         np.ndarray
-            Class probabilities with shape (n_samples, n_classes).
+            Class probabilities.
         """
         self.cache = {"A0": X}
         A = X
@@ -90,11 +137,23 @@ class MLPClassifier:
         num_layers = len(self.weights)
 
         for i in range(num_layers - 1):
-            Z = A @ self.weights[i] + self.biases[i]
-            A = self._relu(Z)
+            layer_num = i + 1
 
-            self.cache[f"Z{i + 1}"] = Z
-            self.cache[f"A{i + 1}"] = A
+            Z = A @ self.weights[i] + self.biases[i]
+            self.cache[f"Z{layer_num}"] = Z
+
+            if self.use_batch_norm:
+                Z_for_activation = self._batch_norm_forward(
+                    Z,
+                    layer_idx=i,
+                    training=training
+                )
+                self.cache[f"Z_tilde{layer_num}"] = Z_for_activation
+            else:
+                Z_for_activation = Z
+
+            A = self._relu(Z_for_activation)
+            self.cache[f"A{layer_num}"] = A
 
         Z_out = A @ self.weights[-1] + self.biases[-1]
         A_out = self._softmax(Z_out)
@@ -104,6 +163,108 @@ class MLPClassifier:
 
         return A_out
     
+    def _batch_norm_forward(self, Z, layer_idx, training=True):
+        """
+        Apply batch normalization to a hidden layer.
+
+        Parameters
+        ----------
+        Z : np.ndarray
+            Linear output before activation.
+        layer_idx : int
+            Hidden layer index.
+        training : bool
+            Whether the model is in training mode.
+
+        Returns
+        -------
+        np.ndarray
+            Batch-normalized output.
+        """
+        gamma = self.bn_gamma[layer_idx]
+        beta = self.bn_beta[layer_idx]
+
+        if training:
+            batch_mean = np.mean(Z, axis=0, keepdims=True)
+            batch_var = np.var(Z, axis=0, keepdims=True)
+
+            Z_centered = Z - batch_mean
+            std_inv = 1.0 / np.sqrt(batch_var + self.bn_epsilon)
+            Z_hat = Z_centered * std_inv
+
+            self.bn_running_mean[layer_idx] = (
+                self.bn_momentum * self.bn_running_mean[layer_idx]
+                + (1 - self.bn_momentum) * batch_mean
+            )
+
+            self.bn_running_var[layer_idx] = (
+                self.bn_momentum * self.bn_running_var[layer_idx]
+                + (1 - self.bn_momentum) * batch_var
+            )
+
+            self.cache[f"BN{layer_idx + 1}"] = {
+                "Z_hat": Z_hat,
+                "Z_centered": Z_centered,
+                "std_inv": std_inv,
+                "gamma": gamma
+            }
+
+        else:
+            Z_centered = Z - self.bn_running_mean[layer_idx]
+            std_inv = 1.0 / np.sqrt(self.bn_running_var[layer_idx] + self.bn_epsilon)
+            Z_hat = Z_centered * std_inv
+
+        return gamma * Z_hat + beta
+    
+    def _batch_norm_backward(self, dZ_norm, layer_idx):
+        """
+        Backpropagate through batch normalization.
+
+        Parameters
+        ----------
+        dZ_norm : np.ndarray
+            Gradient with respect to the normalized layer output.
+        layer_idx : int
+            Hidden layer index.
+
+        Returns
+        -------
+        tuple[np.ndarray, np.ndarray, np.ndarray]
+            Gradients with respect to Z, gamma and beta.
+        """
+        cache = self.cache[f"BN{layer_idx + 1}"]
+
+        Z_hat = cache["Z_hat"]
+        Z_centered = cache["Z_centered"]
+        std_inv = cache["std_inv"]
+        gamma = cache["gamma"]
+
+        m = dZ_norm.shape[0]
+
+        dgamma = np.sum(dZ_norm * Z_hat, axis=0, keepdims=True)
+        dbeta = np.sum(dZ_norm, axis=0, keepdims=True)
+
+        dZ_hat = dZ_norm * gamma
+
+        dvar = np.sum(
+            dZ_hat * Z_centered * (-0.5) * (std_inv ** 3),
+            axis=0,
+            keepdims=True
+        )
+
+        dmean = (
+            np.sum(-dZ_hat * std_inv, axis=0, keepdims=True)
+            + dvar * np.mean(-2.0 * Z_centered, axis=0, keepdims=True)
+        )
+
+        dZ = (
+            dZ_hat * std_inv
+            + dvar * 2.0 * Z_centered / m
+            + dmean / m
+        )
+
+        return dZ, dgamma, dbeta
+
     def cross_entropy_loss(self, y_true, y_pred):
         """
         Compute multiclass cross-entropy loss.
@@ -125,7 +286,14 @@ class MLPClassifier:
 
         return -np.mean(np.sum(y_true * np.log(y_pred), axis=1))
     
-    def update_parameters(self, grads_W, grads_b, learning_rate=None):
+    def update_parameters(
+        self,
+        grads_W,
+        grads_b,
+        grads_gamma=None,
+        grads_beta=None,
+        learning_rate=None
+        ):
         """
         Update parameters using standard gradient descent.
         """
@@ -135,12 +303,17 @@ class MLPClassifier:
         for i in range(len(self.weights)):
             self.weights[i] -= learning_rate * grads_W[i]
             self.biases[i] -= learning_rate * grads_b[i]
+
+        if self.use_batch_norm:
+            for i in range(len(self.bn_gamma)):
+                self.bn_gamma[i] -= learning_rate * grads_gamma[i]
+                self.bn_beta[i] -= learning_rate * grads_beta[i]
     
     def predict_proba(self, X):
         """
         Predict class probabilities.
         """
-        return self.forward(X)
+        return self.forward(X, training=False)
 
     def predict(self, X):
         """
@@ -180,7 +353,7 @@ class MLPClassifier:
             y_pred = self.forward(X_train)
             train_loss = self.cross_entropy_loss(y_train, y_pred)
 
-            grads_W, grads_b = self.backward(y_train)
+            grads_W, grads_b, _1, _2 = self.backward(y_train)
             self.update_parameters(grads_W, grads_b)
 
             history["train_loss"].append(train_loss)
@@ -335,9 +508,12 @@ class MLPClassifier:
         grads_W = [None] * num_layers
         grads_b = [None] * num_layers
 
+        grads_gamma = [None] * (num_layers - 1)
+        grads_beta = [None] * (num_layers - 1)
+
         A_out = self.cache[f"A{num_layers}"]
 
-        # Softmax + cross-entropy simplified gradient
+        # Softmax + cross-entropy simplified gradient.
         dZ = (A_out - y_true) / m
 
         for i in reversed(range(num_layers)):
@@ -353,10 +529,24 @@ class MLPClassifier:
 
             if i > 0:
                 dA_prev = dZ @ self.weights[i].T
-                Z_prev = self.cache[f"Z{i}"]
-                dZ = dA_prev * self._relu_derivative(Z_prev)
 
-        return grads_W, grads_b
+                if self.use_batch_norm:
+                    Z_tilde = self.cache[f"Z_tilde{i}"]
+                    dZ_hidden = dA_prev * self._relu_derivative(Z_tilde)
+
+                    dZ, dgamma, dbeta = self._batch_norm_backward(
+                        dZ_hidden,
+                        layer_idx=i - 1
+                    )
+
+                    grads_gamma[i - 1] = dgamma
+                    grads_beta[i - 1] = dbeta
+
+                else:
+                    Z_prev = self.cache[f"Z{i}"]
+                    dZ = dA_prev * self._relu_derivative(Z_prev)
+
+        return grads_W, grads_b, grads_gamma, grads_beta
 
     def _initialize_adam_state(self):
         """
@@ -368,17 +558,26 @@ class MLPClassifier:
         self.adam_m_b = [np.zeros_like(b) for b in self.biases]
         self.adam_v_b = [np.zeros_like(b) for b in self.biases]
 
+        if self.use_batch_norm:
+            self.adam_m_gamma = [np.zeros_like(g) for g in self.bn_gamma]
+            self.adam_v_gamma = [np.zeros_like(g) for g in self.bn_gamma]
+
+            self.adam_m_beta = [np.zeros_like(b) for b in self.bn_beta]
+            self.adam_v_beta = [np.zeros_like(b) for b in self.bn_beta]
+
         self.adam_t = 0
 
     def _adam_update(
         self,
         grads_W,
         grads_b,
+        grads_gamma,
+        grads_beta,
         learning_rate,
         beta1=0.9,
         beta2=0.999,
         epsilon=1e-8
-    ):
+        ):
         """
         Update parameters using the Adam optimizer.
         """
@@ -400,15 +599,39 @@ class MLPClassifier:
             self.weights[i] -= learning_rate * m_W_hat / (np.sqrt(v_W_hat) + epsilon)
             self.biases[i] -= learning_rate * m_b_hat / (np.sqrt(v_b_hat) + epsilon)
 
+        if self.use_batch_norm:
+            for i in range(len(self.bn_gamma)):
+                self.adam_m_gamma[i] = beta1 * self.adam_m_gamma[i] + (1 - beta1) * grads_gamma[i]
+                self.adam_v_gamma[i] = beta2 * self.adam_v_gamma[i] + (1 - beta2) * (grads_gamma[i] ** 2)
+
+                self.adam_m_beta[i] = beta1 * self.adam_m_beta[i] + (1 - beta1) * grads_beta[i]
+                self.adam_v_beta[i] = beta2 * self.adam_v_beta[i] + (1 - beta2) * (grads_beta[i] ** 2)
+
+                m_gamma_hat = self.adam_m_gamma[i] / (1 - beta1 ** self.adam_t)
+                v_gamma_hat = self.adam_v_gamma[i] / (1 - beta2 ** self.adam_t)
+
+                m_beta_hat = self.adam_m_beta[i] / (1 - beta1 ** self.adam_t)
+                v_beta_hat = self.adam_v_beta[i] / (1 - beta2 ** self.adam_t)
+
+                self.bn_gamma[i] -= learning_rate * m_gamma_hat / (np.sqrt(v_gamma_hat) + epsilon)
+                self.bn_beta[i] -= learning_rate * m_beta_hat / (np.sqrt(v_beta_hat) + epsilon)
+
     def _copy_parameters(self):
         """
         Copy current model parameters.
         """
-        return {
+        parameters = {
             "weights": [W.copy() for W in self.weights],
             "biases": [b.copy() for b in self.biases]
         }
 
+        if self.use_batch_norm:
+            parameters["bn_gamma"] = [g.copy() for g in self.bn_gamma]
+            parameters["bn_beta"] = [b.copy() for b in self.bn_beta]
+            parameters["bn_running_mean"] = [m.copy() for m in self.bn_running_mean]
+            parameters["bn_running_var"] = [v.copy() for v in self.bn_running_var]
+
+        return parameters
 
     def _restore_parameters(self, parameters):
         """
@@ -417,6 +640,75 @@ class MLPClassifier:
         self.weights = [W.copy() for W in parameters["weights"]]
         self.biases = [b.copy() for b in parameters["biases"]]
 
+        if self.use_batch_norm:
+            self.bn_gamma = [g.copy() for g in parameters["bn_gamma"]]
+            self.bn_beta = [b.copy() for b in parameters["bn_beta"]]
+            self.bn_running_mean = [m.copy() for m in parameters["bn_running_mean"]]
+            self.bn_running_var = [v.copy() for v in parameters["bn_running_var"]]
+
+    def _clip_gradients_by_global_norm(
+    self,
+    grads_W,
+    grads_b,
+    grads_gamma=None,
+    grads_beta=None,
+    max_norm=None
+    ):
+        """
+        Clip gradients using global norm.
+        """
+        if max_norm is None:
+            return grads_W, grads_b, grads_gamma, grads_beta
+
+        total_norm_sq = 0.0
+
+        all_grads = grads_W + grads_b
+
+        if grads_gamma is not None:
+            all_grads += [g for g in grads_gamma if g is not None]
+
+        if grads_beta is not None:
+            all_grads += [g for g in grads_beta if g is not None]
+
+        for grad in all_grads:
+            if grad is not None:
+                total_norm_sq += np.sum(grad ** 2)
+
+        total_norm = np.sqrt(total_norm_sq)
+
+        if total_norm <= max_norm:
+            return grads_W, grads_b, grads_gamma, grads_beta
+
+        scale = max_norm / (total_norm + 1e-12)
+
+        grads_W = [g * scale for g in grads_W]
+        grads_b = [g * scale for g in grads_b]
+
+        if grads_gamma is not None:
+            grads_gamma = [
+                g * scale if g is not None else None
+                for g in grads_gamma
+            ]
+
+        if grads_beta is not None:
+            grads_beta = [
+                g * scale if g is not None else None
+                for g in grads_beta
+            ]
+
+        return grads_W, grads_b, grads_gamma, grads_beta
+
+    def _smooth_labels(self, y, smoothing):
+        """
+        Apply label smoothing to one-hot encoded labels.
+        """
+        if smoothing <= 0:
+            return y
+
+        num_classes = y.shape[1]
+
+        return y * (1 - smoothing) + smoothing / num_classes
+    
     def fit_advanced(
     self,
     X_train,
@@ -433,6 +725,8 @@ class MLPClassifier:
     l2_lambda=0.0,
     early_stopping=False,
     patience=10,
+    label_smoothing=0,
+    gradient_clip_norm=None,
     verbose=True
     ):
         """
@@ -445,6 +739,8 @@ class MLPClassifier:
         - Adam optimizer
         - L2 regularization
         - Early stopping
+        - Label smoothing
+        - Gradient clipping
         """
         history = {
             "train_ce": [],
@@ -475,24 +771,56 @@ class MLPClassifier:
                 batch_size=batch_size,
                 shuffle=True
             ):
-                y_pred_batch = self.forward(X_batch)
-                grads_W, grads_b = self.backward(y_batch, l2_lambda=l2_lambda)
+                # Apply label smoothing only during training.
+                y_batch_train = self._smooth_labels(
+                    y_batch,
+                    smoothing=label_smoothing
+                )
+
+                # Forward pass in training mode.
+                y_pred_batch = self.forward(
+                    X_batch,
+                    training=True
+                )
+
+                # Backward pass.
+                grads_W, grads_b, grads_gamma, grads_beta = self.backward(
+                    y_batch_train,
+                    l2_lambda=l2_lambda
+                )
+
+                # Clip gradients before updating parameters.
+                grads_W, grads_b, grads_gamma, grads_beta = self._clip_gradients_by_global_norm(
+                    grads_W,
+                    grads_b,
+                    grads_gamma,
+                    grads_beta,
+                    max_norm=gradient_clip_norm
+                )
 
                 if optimizer == "gd":
-                    self.update_parameters(grads_W, grads_b, learning_rate=current_lr)
+                    self.update_parameters(
+                        grads_W,
+                        grads_b,
+                        grads_gamma,
+                        grads_beta,
+                        learning_rate=current_lr
+                    )
 
                 elif optimizer == "adam":
                     self._adam_update(
                         grads_W,
                         grads_b,
+                        grads_gamma,
+                        grads_beta,
                         learning_rate=current_lr
                     )
 
                 else:
                     raise ValueError("optimizer must be 'gd' or 'adam'")
 
-            train_pred = self.forward(X_train)
-            val_pred = self.forward(X_val)
+            train_pred = self.forward(X_train, training=False)
+            val_pred = self.forward(X_val, training=False)
 
             train_ce = self.cross_entropy_loss(y_train, train_pred)
             val_ce = self.cross_entropy_loss(y_val, val_pred)

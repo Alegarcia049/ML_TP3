@@ -21,10 +21,6 @@ data/
 *.npy
 *.npz
 
-# Results that can be regenerated
-results/figures/*
-results/tables/*
-
 # Model checkpoints / binaries
 *.pkl
 *.joblib
