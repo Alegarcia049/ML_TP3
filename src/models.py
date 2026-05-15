@@ -13,8 +13,6 @@ class MLPClassifier:
     def __init__(
         self,
         layer_sizes,
-        learning_rate=0.01,
-        seed=42,
         use_batch_norm=False,
         bn_momentum=0.9,
         bn_epsilon=1e-5
@@ -26,10 +24,6 @@ class MLPClassifier:
         ----------
         layer_sizes : list[int]
             Network architecture. Example: [784, 128, 64, 47].
-        learning_rate : float
-            Default gradient descent learning rate.
-        seed : int
-            Random seed for reproducibility.
         use_batch_norm : bool
             Whether to apply batch normalization to hidden layers.
         bn_momentum : float
@@ -38,8 +32,6 @@ class MLPClassifier:
             Numerical stability constant for batch normalization.
         """
         self.layer_sizes = layer_sizes
-        self.learning_rate = learning_rate
-        self.rng = np.random.default_rng(seed)
 
         self.use_batch_norm = use_batch_norm
         self.bn_momentum = bn_momentum
@@ -297,9 +289,6 @@ class MLPClassifier:
         """
         Update parameters using standard gradient descent.
         """
-        if learning_rate is None:
-            learning_rate = self.learning_rate
-
         for i in range(len(self.weights)):
             self.weights[i] -= learning_rate * grads_W[i]
             self.biases[i] -= learning_rate * grads_b[i]
@@ -321,52 +310,7 @@ class MLPClassifier:
         """
         probabilities = self.predict_proba(X)
         return np.argmax(probabilities, axis=1)
-    
-    def fit(self, X_train, y_train, X_val=None, y_val=None, epochs=100):
-        """
-        Train the model using full-batch gradient descent.
 
-        Parameters
-        ----------
-        X_train : np.ndarray
-            Training features.
-        y_train : np.ndarray
-            One-hot encoded training labels.
-        X_val : np.ndarray, optional
-            Validation features.
-        y_val : np.ndarray, optional
-            One-hot encoded validation labels.
-        epochs : int
-            Number of training epochs.
-
-        Returns
-        -------
-        dict
-            Training history with loss values.
-        """
-        history = {
-            "train_loss": [],
-            "val_loss": []
-        }
-
-        for epoch in range(epochs):
-            y_pred = self.forward(X_train)
-            train_loss = self.cross_entropy_loss(y_train, y_pred)
-
-            grads_W, grads_b, _1, _2 = self.backward(y_train)
-            self.update_parameters(grads_W, grads_b)
-
-            history["train_loss"].append(train_loss)
-
-            if X_val is not None and y_val is not None:
-                val_pred = self.forward(X_val)
-                val_loss = self.cross_entropy_loss(y_val, val_pred)
-                history["val_loss"].append(val_loss)
-
-            if epoch % 10 == 0:
-                print(f"Epoch {epoch:03d} | Train loss: {train_loss:.4f}")
-
-        return history
     
     def accuracy_score(self, y_true, y_pred):
         """
@@ -709,7 +653,7 @@ class MLPClassifier:
 
         return y * (1 - smoothing) + smoothing / num_classes
     
-    def fit_advanced(
+    def fit(
     self,
     X_train,
     y_train,
@@ -743,8 +687,8 @@ class MLPClassifier:
         - Gradient clipping
         """
         history = {
-            "train_ce": [],
-            "val_ce": [],
+            "train_loss": [],
+            "val_loss": [],
             "learning_rate": []
         }
 
@@ -822,16 +766,16 @@ class MLPClassifier:
             train_pred = self.forward(X_train, training=False)
             val_pred = self.forward(X_val, training=False)
 
-            train_ce = self.cross_entropy_loss(y_train, train_pred)
-            val_ce = self.cross_entropy_loss(y_val, val_pred)
+            train_loss = self.cross_entropy_loss(y_train, train_pred)
+            val_loss = self.cross_entropy_loss(y_val, val_pred)
 
-            history["train_ce"].append(train_ce)
-            history["val_ce"].append(val_ce)
+            history["train_loss"].append(train_loss)
+            history["val_loss"].append(val_loss)
             history["learning_rate"].append(current_lr)
 
             if early_stopping:
-                if val_ce < best_val_loss:
-                    best_val_loss = val_ce
+                if val_loss < best_val_loss:
+                    best_val_loss = val_loss
                     best_parameters = self._copy_parameters()
                     epochs_without_improvement = 0
                 else:
@@ -848,8 +792,8 @@ class MLPClassifier:
                 print(
                     f"Epoch {epoch:03d} | "
                     f"LR: {current_lr:.6f} | "
-                    f"Train CE: {train_ce:.4f} | "
-                    f"Val CE: {val_ce:.4f}"
+                    f"Train CE: {train_loss:.4f} | "
+                    f"Val CE: {val_loss:.4f}"
                 )
 
         return history
