@@ -41,7 +41,7 @@ def plot_loss_curves(history):
 
     plt.xlabel("Epoch")
     plt.ylabel("Cross-Entropy")
-    plt.title("M0 - Cross-Entropy Loss")
+    plt.title("Cross-Entropy Loss")
     plt.legend()
     plt.grid(True)
     plt.show()
