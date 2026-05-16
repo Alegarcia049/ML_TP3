@@ -9,7 +9,6 @@ class MLPClassifier:
     in hidden layers, softmax output, cross-entropy loss, and standard gradient
     descent optimization.
     """
-    ### MO
     def __init__(
         self,
         layer_sizes,
@@ -385,7 +384,6 @@ class MLPClassifier:
             "f1_macro": self.f1_macro_score(y_true, y_pred, num_classes)
         }
     
-    ###M1
     def _create_batches(self, X, y, batch_size, shuffle=True):
         """
         Create mini-batches from the training data.

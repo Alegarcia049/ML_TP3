@@ -1,4 +1,4 @@
-- Revisar funciones redundantes (doble fit)
 - Revisar formateo de funciones y docstrings
-- Revisar la implementacion de grid search
-- Cambiar uso de procesadores de numpy
+- Batch_size
+- Tratar de que la grid sea parecida
+- Rearmar el train torch para que retornee algo que pueda ponerse en una ablation table
