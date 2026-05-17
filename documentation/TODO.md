@@ -1,4 +1,2 @@
 - Revisar formateo de funciones y docstrings
-- Batch_size
-- Tratar de que la grid sea parecida
-- Rearmar el train torch para que retornee algo que pueda ponerse en una ablation table
+- Revisar como se pasan los params finales

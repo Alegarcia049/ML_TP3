@@ -20,8 +20,8 @@ class TorchMLPClassifier(nn.Module):
         use_batch_norm=False,
         bn_momentum=0.9,
         bn_epsilon=1e-5,
-        device="cuda",
-        activation_name="softmax",
+        device=None,
+        activation_name="relu",
         dropout_rate=0.0
     ):
         """
@@ -52,13 +52,15 @@ class TorchMLPClassifier(nn.Module):
         self.bn_epsilon = bn_epsilon
         self.activation_name = activation_name
         self.dropout_rate = dropout_rate
+        if device is None:
+            device = "cuda" if torch.cuda.is_available() else "cpu"
         self.device = torch.device(device)
         self.network = self._build_network()
         self.to(self.device)
 
     def _get_activation_layer(self):
         """
-        Return the selected activation layer.
+        Return the selected hidden-layer activation.
         """
         if self.activation_name == "relu":
             return nn.ReLU()
@@ -66,14 +68,15 @@ class TorchMLPClassifier(nn.Module):
         if self.activation_name == "leaky_relu":
             return nn.LeakyReLU(negative_slope=0.01)
 
-        if self.activation_name == "silu":
+        if self.activation_name in ["silu", "swish"]:
             return nn.SiLU()
 
         if self.activation_name == "gelu":
             return nn.GELU()
 
         raise ValueError(
-            "activation_name must be 'relu', 'leaky_relu', 'silu', or 'gelu'"
+            "activation_name must be 'relu', 'leaky_relu', 'silu', "
+            "'swish', or 'gelu'"
         )
     
     def _build_network(self):
@@ -271,19 +274,73 @@ def _l2_penalty(model, l2_lambda, batch_size):
     return (l2_lambda / (2 * batch_size)) * penalty
 
 
-def _evaluate_torch_model(model, X, y, batch_size=1024):
+def labels_from_targets(y):
     """
-    Evaluate cross-entropy and accuracy in batches.
+    Convert labels to class indices.
+    """
+    y = np.asarray(y)
+
+    if y.ndim == 2:
+        return np.argmax(y, axis=1)
+
+    return y.reshape(-1).astype(int)
+
+
+def f1_macro_from_confusion_matrix(cm):
+    """
+    Compute macro F1-score from a confusion matrix.
+    """
+    f1_scores = []
+
+    for cls in range(cm.shape[0]):
+        tp = cm[cls, cls]
+        fp = np.sum(cm[:, cls]) - tp
+        fn = np.sum(cm[cls, :]) - tp
+
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+
+        if precision + recall > 0:
+            f1 = 2 * precision * recall / (precision + recall)
+        else:
+            f1 = 0.0
+
+        f1_scores.append(f1)
+
+    return float(np.mean(f1_scores))
+
+
+def evaluate_torch_model(
+    model,
+    X,
+    y,
+    batch_size=1024,
+    num_classes=None,
+    compute_confusion=True
+):
+    """
+    Evaluate a PyTorch classifier with CE, accuracy, confusion matrix and F1.
     """
     model.eval()
 
     device = model.device
 
+    y_labels = labels_from_targets(y)
+
+    if num_classes is None:
+        num_classes = model.layer_sizes[-1]
+
     X_tensor = torch.as_tensor(X, dtype=torch.float32)
-    y_tensor = _prepare_targets(y, device="cpu")
+    y_tensor = torch.as_tensor(y_labels, dtype=torch.long)
 
     dataset = TensorDataset(X_tensor, y_tensor)
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
+
+    loader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        pin_memory=(device.type == "cuda")
+    )
 
     criterion = nn.CrossEntropyLoss()
 
@@ -291,31 +348,43 @@ def _evaluate_torch_model(model, X, y, batch_size=1024):
     total_correct = 0
     total_samples = 0
 
+    cm = np.zeros((num_classes, num_classes), dtype=int)
+
     with torch.no_grad():
         for X_batch, y_batch in loader:
-            X_batch = X_batch.to(device)
-            y_batch = y_batch.to(device)
+            X_batch = X_batch.to(device, non_blocking=True)
+            y_batch = y_batch.to(device, non_blocking=True)
 
             logits = model(X_batch)
             loss = criterion(logits, y_batch)
 
             y_pred = torch.argmax(logits, dim=1)
 
-            batch_size_current = X_batch.shape[0]
+            current_batch_size = X_batch.shape[0]
 
-            total_loss += loss.item() * batch_size_current
+            total_loss += loss.item() * current_batch_size
             total_correct += torch.sum(y_pred == y_batch).item()
-            total_samples += batch_size_current
+            total_samples += current_batch_size
 
-    return {
+            if compute_confusion:
+                y_true_np = y_batch.cpu().numpy()
+                y_pred_np = y_pred.cpu().numpy()
+
+                np.add.at(cm, (y_true_np, y_pred_np), 1)
+
+    result = {
         "cross_entropy": total_loss / total_samples,
         "accuracy": total_correct / total_samples
     }
 
+    if compute_confusion:
+        result["confusion_matrix"] = cm
+        result["f1_macro"] = f1_macro_from_confusion_matrix(cm)
+
+    return result
+
 
 def train_torch_model(
-    model_name,
-    implementation,
     model,
     X_train,
     y_train,
@@ -418,7 +487,7 @@ def train_torch_model(
             X_batch = X_batch.to(device)
             y_batch = y_batch.to(device)
 
-            torch_optimizer.zero_grad()
+            torch_optimizer.zero_grad(set_to_none=True)
 
             logits = model(X_batch)
 
@@ -441,14 +510,14 @@ def train_torch_model(
 
             torch_optimizer.step()
 
-        train_metrics = _evaluate_torch_model(
+        train_metrics = evaluate_torch_model(
             model=model,
             X=X_train,
             y=y_train,
             batch_size=1024
         )
 
-        val_metrics = _evaluate_torch_model(
+        val_metrics = evaluate_torch_model(
             model=model,
             X=X_val,
             y=y_val,
@@ -491,19 +560,84 @@ def train_torch_model(
 
     return history
 
-def labels_from_targets(y):
+def train_and_evaluate_torch_model(
+    model_name,
+    implementation,
+    model,
+    X_train,
+    y_train,
+    X_val,
+    y_val,
+    train_config,
+    plot=False
+):
     """
-    Convert labels to class indices.
-
-    Accepts integer labels or one-hot encoded labels.
+    Train a PyTorch model and return ablation-compatible results.
     """
-    y = np.asarray(y)
+    start_time = time.time()
 
-    if y.ndim == 2:
-        return np.argmax(y, axis=1)
+    history = train_torch_model(
+        model=model,
+        X_train=X_train,
+        y_train=y_train,
+        X_val=X_val,
+        y_val=y_val,
+        **train_config
+    )
 
-    return y.reshape(-1).astype(int)
+    elapsed_time = time.time() - start_time
 
+    num_classes = model.layer_sizes[-1]
+
+    train_metrics = evaluate_torch_model(
+        model=model,
+        X=X_train,
+        y=y_train,
+        num_classes=num_classes,
+        compute_confusion=True
+    )
+
+    val_metrics = evaluate_torch_model(
+        model=model,
+        X=X_val,
+        y=y_val,
+        num_classes=num_classes,
+        compute_confusion=True
+    )
+
+    result = {
+        "Model": model_name,
+        "Implementation": implementation,
+        "Time [sec]": elapsed_time,
+        "Train CE": train_metrics["cross_entropy"],
+        "Val CE": val_metrics["cross_entropy"],
+        "Train Accuracy": train_metrics["accuracy"],
+        "Val Accuracy": val_metrics["accuracy"],
+        "Train F1 Macro": train_metrics["f1_macro"],
+        "Val F1 Macro": val_metrics["f1_macro"]
+    }
+
+    result = pd.Series(result)
+
+    if plot:
+        display(result)
+        plot_loss_curves(history)
+
+        plot_confusion_matrix(
+            val_metrics["confusion_matrix"],
+            title=f"{model_name} - Validation Confusion Matrix"
+        )
+
+        cm_val_norm = normalize_confusion_matrix(
+            val_metrics["confusion_matrix"]
+        )
+
+        plot_confusion_matrix(
+            cm_val_norm,
+            title=f"{model_name} - Normalized Validation Confusion Matrix"
+        )
+
+    return result, history
 
 def confusion_matrix(y_true, y_pred, num_classes):
     """
@@ -576,9 +710,10 @@ def grid_search_cv_torch_mlp(
     clear_cuda_cache=True
 ):
     """
-    Run stratified cross-validation grid search for PyTorch MLP models.
+    Run a PyTorch MLP hyperparameter search.
 
-    The best configuration is selected by lowest mean validation cross-entropy.
+    If k_folds=1, uses a single stratified holdout split.
+    If k_folds>1, uses stratified K-fold cross-validation.
     """
     y_labels = labels_from_targets(y)
 
@@ -616,7 +751,8 @@ def grid_search_cv_torch_mlp(
 
             start_time = time.perf_counter()
 
-            history = model.fit(
+            history = train_torch_model(
+                model=model,
                 X_train=X_train_fold,
                 y_train=y_train_fold,
                 X_val=X_val_fold,
@@ -626,18 +762,20 @@ def grid_search_cv_torch_mlp(
 
             elapsed_time = time.perf_counter() - start_time
 
-            train_metrics = complete_torch_metrics(
+            train_metrics = evaluate_torch_model(
                 model=model,
                 X=X_train_fold,
                 y=y_train_fold,
-                num_classes=num_classes
+                num_classes=num_classes,
+                compute_confusion=True
             )
 
-            val_metrics = complete_torch_metrics(
+            val_metrics = evaluate_torch_model(
                 model=model,
                 X=X_val_fold,
                 y=y_val_fold,
-                num_classes=num_classes
+                num_classes=num_classes,
+                compute_confusion=True
             )
 
             fold_row = {
@@ -722,3 +860,99 @@ def grid_search_cv_torch_mlp(
         "best_run": best_run,
         "all_runs": all_runs,
     })
+
+def add_gaussian_noise(X, noise_std):
+    """Add Gaussian noise to normalized images and clip values to [0, 1]."""
+    noise = np.random.normal(
+        loc=0.0,
+        scale=noise_std,
+        size=X.shape
+    )
+
+    X_noisy = X + noise
+    X_noisy = np.clip(X_noisy, 0.0, 1.0)
+    return X_noisy.astype(np.float32)
+
+
+def evaluate_noise_robustness(
+    models_info,
+    X_test,
+    y_test,
+    noise_levels
+):
+    """
+    Evaluate robustness of several trained models under Gaussian noise.
+
+    Parameters
+    ----------
+    models_info : list[dict]
+        Each dict must contain: name, implementation, model, model_type.
+    X_test : np.ndarray
+        Test features normalized in [0, 1].
+    y_test : np.ndarray
+        Test labels, either one-hot or integer encoded.
+    noise_levels : list[float]
+        Gaussian noise standard deviations.
+    random_state : int
+        Base random seed.
+
+    Returns
+    -------
+    pd.DataFrame
+        Robustness results for all models and noise levels.
+    """
+    rows = []
+
+    for noise_std in noise_levels:
+        if noise_std == 0.0:
+            X_eval = X_test.astype(np.float32)
+        else:
+            X_eval = add_gaussian_noise(
+                X=X_test,
+                noise_std=noise_std
+            )
+
+        for model_info in models_info:
+            if model_info["model_type"] == "numpy":
+                metrics = model_info["model"].evaluate(X_eval, y_test)
+            else: 
+                metrics = evaluate_torch_model(model_info["model"], X_eval, y_test, compute_confusion=True)
+
+            rows.append({
+                "Model": model_info["name"],
+                "Implementation": model_info["implementation"],
+                "Noise Std": noise_std,
+                "Test CE": metrics["cross_entropy"],
+                "Test Accuracy": metrics["accuracy"],
+                "Test F1 Macro": metrics["f1_macro"]
+            })
+
+    results = pd.DataFrame(rows)
+
+    clean_results = results[results["Noise Std"] == 0.0][
+        ["Model", "Test CE", "Test Accuracy", "Test F1 Macro"]
+    ].rename(columns={
+        "Test CE": "Clean Test CE",
+        "Test Accuracy": "Clean Test Accuracy",
+        "Test F1 Macro": "Clean Test F1 Macro"
+    })
+
+    results = results.merge(
+        clean_results,
+        on="Model",
+        how="left"
+    )
+
+    results["CE Increase"] = (
+        results["Test CE"] - results["Clean Test CE"]
+    )
+
+    results["Accuracy Drop"] = (
+        results["Clean Test Accuracy"] - results["Test Accuracy"]
+    )
+
+    results["F1 Drop"] = (
+        results["Clean Test F1 Macro"] - results["Test F1 Macro"]
+    )
+
+    return results

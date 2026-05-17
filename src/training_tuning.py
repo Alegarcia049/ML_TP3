@@ -77,6 +77,42 @@ def expand_param_grid(param_grid):
 
     return combinations
 
+def stratified_split(X, y, train_ratio=0.70, val_ratio=0.15, seed=42):
+    """Create a stratified train/validation/test split using only NumPy."""
+    rng = np.random.default_rng(seed)
+
+    train_indices = []
+    val_indices = []
+    test_indices = []
+
+    classes = np.unique(y)
+
+    for cls in classes:
+        cls_indices = np.where(y == cls)[0]
+        rng.shuffle(cls_indices)
+
+        n = len(cls_indices)
+        n_train = int(train_ratio * n)
+        n_val = int(val_ratio * n)
+
+        train_indices.extend(cls_indices[:n_train])
+        val_indices.extend(cls_indices[n_train:n_train + n_val])
+        test_indices.extend(cls_indices[n_train + n_val:])
+
+    train_indices = np.array(train_indices)
+    val_indices = np.array(val_indices)
+    test_indices = np.array(test_indices)
+
+    rng.shuffle(train_indices)
+    rng.shuffle(val_indices)
+    rng.shuffle(test_indices)
+
+    X_train, y_train = X[train_indices], y[train_indices]
+    X_val, y_val = X[val_indices], y[val_indices]
+    X_test, y_test = X[test_indices], y[test_indices]
+
+    return X_train, X_val, X_test, y_train, y_val, y_test
+
 def stratified_k_fold_indices(y, k_folds=3):
     """
     Create stratified K-fold indices using only NumPy.
