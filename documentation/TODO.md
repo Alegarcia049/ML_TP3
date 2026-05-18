@@ -1,2 +1,0 @@
-- Revisar formateo de funciones y docstrings
-- Revisar como se pasan los params finales

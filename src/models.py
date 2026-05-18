@@ -1,6 +1,5 @@
 import numpy as np
 
-
 class MLPClassifier:
     """
     Multi-layer perceptron classifier implemented with NumPy.
@@ -23,7 +22,7 @@ class MLPClassifier:
         ----------
         layer_sizes : list[int]
             Network architecture. Example: [784, 128, 64, 47].
-        use_batch_norm : bool
+        use_batch_norm : bool, default=False
             Whether to apply batch normalization to hidden layers.
         bn_momentum : float
             Momentum used for running mean and variance.
@@ -114,7 +113,7 @@ class MLPClassifier:
         ----------
         X : np.ndarray
             Input matrix with shape (n_samples, n_features).
-        training : bool
+        training : bool, default=True
             Whether the model is in training mode.
 
         Returns
@@ -164,7 +163,7 @@ class MLPClassifier:
             Linear output before activation.
         layer_idx : int
             Hidden layer index.
-        training : bool
+        training : bool, default=True
             Whether the model is in training mode.
 
         Returns
@@ -277,7 +276,7 @@ class MLPClassifier:
 
         return -np.mean(np.sum(y_true * np.log(y_pred), axis=1))
     
-    def update_parameters(
+    def _update_parameters(
         self,
         grads_W,
         grads_b,
@@ -416,7 +415,7 @@ class MLPClassifier:
             return initial_lr
 
         if scheduler == "linear":
-            progress = epoch / max_epochs
+            progress = epoch / max(max_epochs - 1, 1)
             lr = initial_lr - progress * (initial_lr - final_lr)
             return max(lr, final_lr)
 
@@ -425,20 +424,6 @@ class MLPClassifier:
             return max(lr, final_lr)
 
         raise ValueError("scheduler must be None, 'linear', or 'exponential'")
-    
-    def _l2_penalty(self, l2_lambda, n_samples):
-        """
-        Compute L2 regularization penalty.
-        """
-        if l2_lambda == 0:
-            return 0.0
-
-        penalty = 0.0
-
-        for W in self.weights:
-            penalty += np.sum(W ** 2)
-
-        return (l2_lambda / (2 * n_samples)) * penalty
     
     def backward(self, y_true, l2_lambda=0.0):
         """
@@ -589,13 +574,13 @@ class MLPClassifier:
             self.bn_running_var = [v.copy() for v in parameters["bn_running_var"]]
 
     def _clip_gradients_by_global_norm(
-    self,
-    grads_W,
-    grads_b,
-    grads_gamma=None,
-    grads_beta=None,
-    max_norm=None
-    ):
+        self,
+        grads_W,
+        grads_b,
+        grads_gamma=None,
+        grads_beta=None,
+        max_norm=None
+        ):
         """
         Clip gradients using global norm.
         """
@@ -652,25 +637,25 @@ class MLPClassifier:
         return y * (1 - smoothing) + smoothing / num_classes
     
     def fit(
-    self,
-    X_train,
-    y_train,
-    X_val,
-    y_val,
-    epochs=100,
-    batch_size=128,
-    optimizer="gd",
-    scheduler=None,
-    initial_lr=0.01,
-    final_lr=1e-4,
-    decay_rate=0.95,
-    l2_lambda=0.0,
-    early_stopping=False,
-    patience=10,
-    label_smoothing=0,
-    gradient_clip_norm=None,
-    verbose=True
-    ):
+        self,
+        X_train,
+        y_train,
+        X_val,
+        y_val,
+        epochs=100,
+        batch_size=128,
+        optimizer="gd",
+        scheduler=None,
+        initial_lr=0.01,
+        final_lr=1e-4,
+        decay_rate=0.95,
+        l2_lambda=0.0,
+        early_stopping=False,
+        patience=10,
+        label_smoothing=0,
+        gradient_clip_norm=None,
+        verbose=True
+        ):
         """
         Train the model using mini-batch optimization and optional improvements.
 
@@ -720,10 +705,7 @@ class MLPClassifier:
                 )
 
                 # Forward pass in training mode.
-                y_pred_batch = self.forward(
-                    X_batch,
-                    training=True
-                )
+                self.forward(X_batch, training=True)
 
                 # Backward pass.
                 grads_W, grads_b, grads_gamma, grads_beta = self.backward(
@@ -741,7 +723,7 @@ class MLPClassifier:
                 )
 
                 if optimizer == "gd":
-                    self.update_parameters(
+                    self._update_parameters(
                         grads_W,
                         grads_b,
                         grads_gamma,

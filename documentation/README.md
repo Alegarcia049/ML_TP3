@@ -12,7 +12,7 @@ Implementar y evaluar redes neuronales para clasificación multiclase sobre EMNI
 - `src/`: implementación modular del proyecto.
 - `data/`: datasets locales no versionados.
 - `notebooks/`: notebooks trabajados.
-- `results/`: figuras, tablas y métricas generadas.
+- `results/`: tablasy métricas generadas.
 
 ## Ejecución
 

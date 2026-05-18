@@ -113,6 +113,18 @@ def stratified_split(X, y, train_ratio=0.70, val_ratio=0.15, seed=42):
 
     return X_train, X_val, X_test, y_train, y_val, y_test
 
+def _labels_from_targets(y):
+    """
+    Convert one-hot or integer targets into integer labels.
+    """
+    y_array = np.asarray(y)
+
+    if y_array.ndim == 2:
+        return np.argmax(y_array, axis=1)
+
+    return y_array.reshape(-1)
+
+
 def stratified_k_fold_indices(y, k_folds=3):
     """
     Create stratified K-fold indices using only NumPy.
@@ -120,40 +132,57 @@ def stratified_k_fold_indices(y, k_folds=3):
     Parameters
     ----------
     y : np.ndarray
-        Integer class labels with shape (n_samples,).
+        Integer labels or one-hot encoded labels.
     k_folds : int
-        Number of folds.
+        Number of folds. Must be at least 2.
 
     Returns
     -------
     list[tuple[np.ndarray, np.ndarray]]
         List of (train_indices, val_indices) tuples.
     """
-    y = np.asarray(y).reshape(-1)
+    y_labels = _labels_from_targets(y)
+
+    if k_folds < 2:
+        raise ValueError("k_folds must be at least 2. Use a holdout split instead.")
+
+    n_samples = y_labels.shape[0]
+
+    if k_folds > n_samples:
+        raise ValueError("k_folds cannot be greater than the number of samples.")
+
+    class_counts = np.bincount(y_labels.astype(int))
+
+    if np.any(class_counts[class_counts > 0] < k_folds):
+        raise ValueError(
+            "Each class must have at least k_folds samples for stratified K-fold."
+        )
 
     folds = [[] for _ in range(k_folds)]
 
-    for cls in np.unique(y):
-        cls_indices = np.where(y == cls)[0]
-        np.random.shuffle(cls_indices)
+    for cls in np.unique(y_labels):
+        cls_indices = np.where(y_labels == cls)[0]
+        cls_indices = np.random.permutation(cls_indices)
 
         cls_folds = np.array_split(cls_indices, k_folds)
 
-        for fold_id in range(k_folds):
-            folds[fold_id].extend(cls_folds[fold_id])
+        for fold_id, cls_fold in enumerate(cls_folds):
+            folds[fold_id].extend(cls_fold.tolist())
 
-    folds = [np.array(fold, dtype=int) for fold in folds]
+    folds = [
+        np.random.permutation(np.array(fold, dtype=int))
+        for fold in folds
+    ]
 
+    all_indices = np.arange(n_samples)
     result = []
-
-    all_indices = np.arange(len(y))
 
     for fold_id in range(k_folds):
         val_idx = folds[fold_id]
-        train_idx = np.setdiff1d(all_indices, val_idx, assume_unique=False)
-
-        np.random.shuffle(train_idx)
-        np.random.shuffle(val_idx)
+        train_mask = np.ones(n_samples, dtype=bool)
+        train_mask[val_idx] = False
+        train_idx = all_indices[train_mask]
+        train_idx = np.random.permutation(train_idx)
 
         result.append((train_idx, val_idx))
 

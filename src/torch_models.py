@@ -1,10 +1,18 @@
 import numpy as np
+import gc
+import pandas as pd
+from IPython.display import display
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 import copy
 import time
-from src.training_tuning import *
+from src.training_tuning import (
+    _labels_from_targets, 
+    stratified_k_fold_indices, 
+    plot_confusion_matrix, 
+    plot_loss_curves, 
+    normalize_confusion_matrix)
 
 class TorchMLPClassifier(nn.Module):
     """
@@ -90,7 +98,17 @@ class TorchMLPClassifier(nn.Module):
             out_features = self.layer_sizes[i + 1]
 
             linear_layer = nn.Linear(in_features, out_features)
-            nn.init.kaiming_normal_(linear_layer.weight, nonlinearity="relu")
+            if self.activation_name == "leaky_relu":
+                nn.init.kaiming_normal_(
+                    linear_layer.weight,
+                    a=0.01,
+                    nonlinearity="leaky_relu"
+                )
+            else:
+                nn.init.kaiming_normal_(
+                    linear_layer.weight,
+                    nonlinearity="relu"
+                )
             nn.init.zeros_(linear_layer.bias)
 
             layers.append(linear_layer)
@@ -114,7 +132,17 @@ class TorchMLPClassifier(nn.Module):
             self.layer_sizes[-1]
         )
 
-        nn.init.kaiming_normal_(output_layer.weight, nonlinearity="relu")
+        if self.activation_name == "leaky_relu":
+            nn.init.kaiming_normal_(
+                linear_layer.weight,
+                a=0.01,
+                nonlinearity="leaky_relu"
+            )
+        else:
+            nn.init.kaiming_normal_(
+                linear_layer.weight,
+                nonlinearity="relu"
+            )
         nn.init.zeros_(output_layer.bias)
 
         layers.append(output_layer)
@@ -237,7 +265,7 @@ def _get_learning_rate(
         return initial_lr
 
     if scheduler == "linear":
-        progress = epoch / max_epochs
+        progress = epoch / max(max_epochs - 1, 1)
         lr = initial_lr - progress * (initial_lr - final_lr)
         return max(lr, final_lr)
 
@@ -272,18 +300,6 @@ def _l2_penalty(model, l2_lambda, batch_size):
             penalty = penalty + torch.sum(param ** 2)
 
     return (l2_lambda / (2 * batch_size)) * penalty
-
-
-def labels_from_targets(y):
-    """
-    Convert labels to class indices.
-    """
-    y = np.asarray(y)
-
-    if y.ndim == 2:
-        return np.argmax(y, axis=1)
-
-    return y.reshape(-1).astype(int)
 
 
 def f1_macro_from_confusion_matrix(cm):
@@ -325,7 +341,7 @@ def evaluate_torch_model(
 
     device = model.device
 
-    y_labels = labels_from_targets(y)
+    y_labels = _labels_from_targets(y)
 
     if num_classes is None:
         num_classes = model.layer_sizes[-1]
@@ -681,7 +697,7 @@ def complete_torch_metrics(model, X, y, num_classes):
     """
     Complete model.evaluate output with confusion matrix and macro F1.
     """
-    y_true = labels_from_targets(y)
+    y_true = _labels_from_targets(y)
 
     metrics = model.evaluate(X, y_true)
 
@@ -715,7 +731,7 @@ def grid_search_cv_torch_mlp(
     If k_folds=1, uses a single stratified holdout split.
     If k_folds>1, uses stratified K-fold cross-validation.
     """
-    y_labels = labels_from_targets(y)
+    y_labels = _labels_from_targets(y)
 
     if np.asarray(y).ndim == 2:
         num_classes = np.asarray(y).shape[1]
@@ -893,8 +909,6 @@ def evaluate_noise_robustness(
         Test labels, either one-hot or integer encoded.
     noise_levels : list[float]
         Gaussian noise standard deviations.
-    random_state : int
-        Base random seed.
 
     Returns
     -------
